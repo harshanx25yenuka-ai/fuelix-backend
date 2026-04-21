@@ -1,10 +1,19 @@
 package com.fuelix.controller;
 
-import com.fuelix.model.Vehicle;
+import com.fuelix.config.JwtService;
+import com.fuelix.dto.QrGenerationResponse;
+import com.fuelix.model.FuelLog;
+import com.fuelix.model.QrTokenInfo;
+import com.fuelix.model.QrVerificationResult;
 import com.fuelix.model.Quota;
+import com.fuelix.model.Vehicle;
 import com.fuelix.model.Wallet;
-import com.fuelix.service.VehicleService;
+import com.fuelix.service.FuelLogService;
+import com.fuelix.service.FuelPriceService;
+import com.fuelix.service.NotificationService;
+import com.fuelix.service.QrTokenService;
 import com.fuelix.service.QuotaService;
+import com.fuelix.service.VehicleService;
 import com.fuelix.service.WalletService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -29,6 +38,41 @@ public class VehicleController {
     @Autowired
     private WalletService walletService;
 
+    @Autowired
+    private FuelLogService fuelLogService;
+
+    @Autowired
+    private FuelPriceService fuelPriceService;
+
+    @Autowired
+    private NotificationService notificationService;
+
+    @Autowired
+    private QrTokenService qrTokenService;
+
+    @Autowired
+    private JwtService jwtService;
+
+    // Helper method to extract user ID from token
+    private Long getUserIdFromToken(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return null;
+        }
+        String token = authHeader.substring(7);
+        return jwtService.extractUserId(token);
+    }
+
+    // Helper method to extract staff ID from token
+    private Long getStaffIdFromToken(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return null;
+        }
+        String token = authHeader.substring(7);
+        return jwtService.extractUserId(token);
+    }
+
+    // ==================== BASIC CRUD OPERATIONS ====================
+
     @GetMapping
     public ResponseEntity<?> getAllVehicles() {
         List<Vehicle> vehicles = vehicleService.getAllVehicles();
@@ -49,6 +93,185 @@ public class VehicleController {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
         }
     }
+
+    @GetMapping("/user/{userId}")
+    public ResponseEntity<?> getUserVehicles(@PathVariable Long userId) {
+        List<Vehicle> vehicles = vehicleService.getUserVehicles(userId);
+        Map<String, Object> response = new HashMap<>();
+        response.put("success", true);
+        response.put("data", vehicles);
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping
+    public ResponseEntity<?> addVehicle(@RequestBody Map<String, Object> payload) {
+        try {
+            Vehicle vehicle = new Vehicle();
+
+            if (payload.containsKey("userId")) {
+                vehicle.setUserId(Long.valueOf(payload.get("userId").toString()));
+            } else {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "userId is required");
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            }
+
+            if (payload.containsKey("type")) {
+                vehicle.setType(payload.get("type").toString());
+            } else {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "type is required");
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            }
+
+            if (payload.containsKey("make")) {
+                vehicle.setMake(payload.get("make").toString());
+            } else {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "make is required");
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            }
+
+            if (payload.containsKey("model")) {
+                vehicle.setModel(payload.get("model").toString());
+            } else {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "model is required");
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            }
+
+            if (payload.containsKey("year")) {
+                vehicle.setYear(payload.get("year").toString());
+            } else {
+                vehicle.setYear(String.valueOf(LocalDateTime.now().getYear()));
+            }
+
+            if (payload.containsKey("registrationNo")) {
+                vehicle.setRegistrationNo(payload.get("registrationNo").toString());
+            } else {
+                vehicle.setRegistrationNo("TEMP-" + System.currentTimeMillis());
+            }
+
+            if (payload.containsKey("fuelType")) {
+                vehicle.setFuelType(payload.get("fuelType").toString());
+            } else {
+                vehicle.setFuelType("Petrol");
+            }
+
+            vehicle.setEngineCC(payload.getOrDefault("engineCC", "").toString());
+            vehicle.setColor(payload.getOrDefault("color", "").toString());
+            vehicle.setCreatedAt(LocalDateTime.now());
+
+            Vehicle saved = vehicleService.addVehicle(vehicle);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Vehicle added successfully");
+            response.put("data", saved);
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", "Invalid request data: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+        }
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<?> updateVehicle(@PathVariable Long id, @RequestBody Map<String, Object> payload) {
+        try {
+            Vehicle vehicleDetails = new Vehicle();
+
+            if (payload.containsKey("type")) {
+                vehicleDetails.setType(payload.get("type").toString());
+            }
+            if (payload.containsKey("make")) {
+                vehicleDetails.setMake(payload.get("make").toString());
+            }
+            if (payload.containsKey("model")) {
+                vehicleDetails.setModel(payload.get("model").toString());
+            }
+            if (payload.containsKey("year")) {
+                vehicleDetails.setYear(payload.get("year").toString());
+            }
+            if (payload.containsKey("registrationNo")) {
+                vehicleDetails.setRegistrationNo(payload.get("registrationNo").toString());
+            }
+            if (payload.containsKey("fuelType")) {
+                vehicleDetails.setFuelType(payload.get("fuelType").toString());
+            }
+            if (payload.containsKey("engineCC")) {
+                vehicleDetails.setEngineCC(payload.get("engineCC").toString());
+            }
+            if (payload.containsKey("color")) {
+                vehicleDetails.setColor(payload.get("color").toString());
+            }
+
+            Vehicle updated = vehicleService.updateVehicle(id, vehicleDetails);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Vehicle updated successfully");
+            response.put("data", updated);
+            return ResponseEntity.ok(response);
+
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+        }
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> deleteVehicle(@PathVariable Long id) {
+        try {
+            vehicleService.deleteVehicle(id);
+            Map<String, String> response = new HashMap<>();
+            response.put("success", "true");
+            response.put("message", "Vehicle deleted successfully");
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+        }
+    }
+
+    // ==================== FUEL PASS GENERATION ====================
+
+    @PostMapping("/{id}/generate-pass")
+    public ResponseEntity<?> generateFuelPass(@PathVariable Long id) {
+        try {
+            Vehicle vehicle = vehicleService.generateFuelPass(id);
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Fuel Pass generated successfully");
+            response.put("data", vehicle);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+        }
+    }
+
+    @PostMapping("/regenerate-pass/{id}")
+    public ResponseEntity<?> regenerateFuelPass(@PathVariable Long id) {
+        try {
+            Vehicle vehicle = vehicleService.regenerateFuelPass(id);
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Fuel Pass regenerated successfully");
+            response.put("data", vehicle);
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+        }
+    }
+
+    // ==================== QR CODE VERIFICATION (LEGACY) ====================
 
     @GetMapping("/verify-passcode")
     public ResponseEntity<?> verifyVehiclePasscode(@RequestParam String passcode) {
@@ -77,12 +300,39 @@ public class VehicleController {
         }
     }
 
-    // Staff QR Verification - Full verification with quota and wallet
+    @GetMapping("/by-passcode/{passcode}")
+    public ResponseEntity<?> getVehicleByPasscode(@PathVariable String passcode) {
+        try {
+            Vehicle vehicle = vehicleService.getVehicleByPassCode(passcode);
+            return ResponseEntity.ok(vehicle);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+        }
+    }
+
+    @GetMapping("/check-passcode/{passcode}")
+    public ResponseEntity<?> checkPasscodeExists(@PathVariable String passcode) {
+        try {
+            boolean exists = vehicleService.isPasscodeValid(passcode);
+            Map<String, Object> response = new HashMap<>();
+            response.put("valid", exists);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+        }
+    }
+
+    // ==================== STAFF QR VERIFICATION (LEGACY) ====================
+
     @PostMapping("/staff-verify")
     public ResponseEntity<?> staffVerifyPasscode(@RequestBody Map<String, String> payload) {
         try {
             String passcode = payload.get("passcode");
-            System.out.println("=== Staff QR Verification ===");
+            System.out.println("=== Staff QR Verification (Legacy) ===");
             System.out.println("Passcode: " + passcode);
 
             // Step 1: Verify fuel pass code
@@ -130,7 +380,7 @@ public class VehicleController {
             Double balance = walletService.getBalance(vehicle.getUserId());
 
             Map<String, Object> step3 = new HashMap<>();
-            if (balance < 100.0) { // Minimum balance check
+            if (balance < 100.0) {
                 step3.put("success", false);
                 step3.put("message", "Low wallet balance. Current balance: LKR " + String.format("%.2f", balance));
                 step3.put("balance", balance);
@@ -186,165 +436,239 @@ public class VehicleController {
         }
     }
 
-    @GetMapping("/by-passcode/{passcode}")
-    public ResponseEntity<?> getVehicleByPasscode(@PathVariable String passcode) {
+    // ==================== DYNAMIC QR TOKEN APIs (NEW - V2) ====================
+
+    /**
+     * Generate dynamic QR token for a vehicle
+     * Endpoint: POST /api/vehicles/{vehicleId}/dynamic-qr
+     *
+     * @param vehicleId - ID of the vehicle
+     * @param authHeader - Bearer token for authentication
+     * @return QR data string with token ID and expiry info
+     */
+    @PostMapping("/{vehicleId}/dynamic-qr")
+    public ResponseEntity<?> generateDynamicQr(
+            @PathVariable Long vehicleId,
+            @RequestHeader("Authorization") String authHeader) {
         try {
-            Vehicle vehicle = vehicleService.getVehicleByPassCode(passcode);
-            return ResponseEntity.ok(vehicle);
-        } catch (RuntimeException e) {
-            Map<String, String> error = new HashMap<>();
-            error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
-        }
-    }
-
-    @PostMapping
-    public ResponseEntity<?> addVehicle(@RequestBody Map<String, Object> payload) {
-        try {
-            Vehicle vehicle = new Vehicle();
-
-            if (payload.containsKey("userId")) {
-                vehicle.setUserId(Long.valueOf(payload.get("userId").toString()));
-            } else {
-                vehicle.setUserId(1L);
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Not authenticated");
+                return ResponseEntity.status(401).body(error);
             }
 
-            vehicle.setType(payload.get("type").toString());
-            vehicle.setMake(payload.get("make").toString());
-            vehicle.setModel(payload.get("model").toString());
-
-            if (payload.containsKey("year")) {
-                vehicle.setYear(payload.get("year").toString());
-            } else {
-                vehicle.setYear(String.valueOf(LocalDateTime.now().getYear()));
+            // Verify vehicle belongs to user
+            Vehicle vehicle = vehicleService.getVehicleById(vehicleId);
+            if (!vehicle.getUserId().equals(userId)) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Vehicle does not belong to you");
+                return ResponseEntity.status(403).body(error);
             }
 
-            if (payload.containsKey("registrationNo")) {
-                vehicle.setRegistrationNo(payload.get("registrationNo").toString());
-            } else {
-                vehicle.setRegistrationNo("VEH-" + System.currentTimeMillis());
+            // Check if vehicle has fuel pass
+            if (vehicle.getFuelPassCode() == null || vehicle.getFuelPassCode().isEmpty()) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Please generate Fuel Pass first");
+                return ResponseEntity.status(400).body(error);
             }
 
-            if (payload.containsKey("fuelType")) {
-                vehicle.setFuelType(payload.get("fuelType").toString());
-            } else {
-                vehicle.setFuelType("Petrol");
-            }
+            // Generate token
+            QrTokenInfo token = qrTokenService.generateToken(vehicleId, userId);
 
-            vehicle.setEngineCC(payload.getOrDefault("engineCC", "").toString());
-            vehicle.setColor(payload.getOrDefault("color", "").toString());
-            vehicle.setCreatedAt(LocalDateTime.now());
+            // Generate QR payload
+            String qrData = qrTokenService.generateQrPayload(token, vehicle);
 
-            Vehicle saved = vehicleService.addVehicle(vehicle);
+            QrGenerationResponse response = QrGenerationResponse.builder()
+                    .qrData(qrData)
+                    .tokenId(token.getTokenId())
+                    .expiresIn(300)
+                    .generatedAt(System.currentTimeMillis())
+                    .message("QR generated successfully")
+                    .build();
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("message", "Vehicle added successfully");
-            response.put("data", saved);
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
-            error.put("error", "Invalid request data: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            error.put("error", e.getMessage());
+            return ResponseEntity.badRequest().body(error);
         }
     }
 
-    @GetMapping("/user/{userId}")
-    public ResponseEntity<?> getUserVehicles(@PathVariable Long userId) {
-        List<Vehicle> vehicles = vehicleService.getUserVehicles(userId);
-        Map<String, Object> response = new HashMap<>();
-        response.put("success", true);
-        response.put("data", vehicles);
-        return ResponseEntity.ok(response);
+    /**
+     * Staff verify QR code (Version 2 with dynamic token)
+     * Endpoint: POST /api/vehicles/staff-verify-v2
+     *
+     * @param request - Contains qrData string
+     * @return Vehicle details if verification succeeds
+     */
+    @PostMapping("/staff-verify-v2")
+    public ResponseEntity<?> staffVerifyQrV2(@RequestBody Map<String, String> request) {
+        try {
+            String qrData = request.get("qrData");
+
+            if (qrData == null || qrData.isEmpty()) {
+                Map<String, Object> errorResponse = new HashMap<>();
+                errorResponse.put("success", false);
+                errorResponse.put("error", "QR data is required");
+                return ResponseEntity.badRequest().body(errorResponse);
+            }
+
+            System.out.println("=== Staff QR Verification V2 ===");
+            System.out.println("QR Data length: " + qrData.length());
+
+            // Validate QR
+            QrVerificationResult result = qrTokenService.validateQrCode(qrData);
+
+            if (!result.isValid()) {
+                Map<String, Object> errorResponse = new HashMap<>();
+                errorResponse.put("success", false);
+                errorResponse.put("error", result.getError());
+                return ResponseEntity.badRequest().body(errorResponse);
+            }
+
+            Vehicle vehicle = result.getVehicle();
+
+            // Get quota info
+            Quota quota = quotaService.getCurrentQuota(vehicle.getId(), vehicle.getType());
+
+            // Get wallet balance
+            Double balance = walletService.getBalance(vehicle.getUserId());
+
+            // Build response with vehicle details
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("tokenId", result.getTokenId());
+            response.put("message", "QR verified successfully");
+
+            Map<String, Object> vehicleData = new HashMap<>();
+            vehicleData.put("id", vehicle.getId());
+            vehicleData.put("userId", vehicle.getUserId());
+            vehicleData.put("registrationNo", vehicle.getRegistrationNo());
+            vehicleData.put("vehicleType", vehicle.getType());
+            vehicleData.put("make", vehicle.getMake());
+            vehicleData.put("model", vehicle.getModel());
+            vehicleData.put("fuelType", vehicle.getFuelType());
+            vehicleData.put("year", vehicle.getYear());
+            vehicleData.put("color", vehicle.getColor() != null ? vehicle.getColor() : "");
+            response.put("vehicle", vehicleData);
+
+            // Add quota info
+            Map<String, Object> quotaData = new HashMap<>();
+            quotaData.put("remainingQuota", quota.getRemainingLitres());
+            quotaData.put("quotaLitres", quota.getQuotaLitres());
+            quotaData.put("usedLitres", quota.getUsedLitres());
+            response.put("quota", quotaData);
+
+            // Add wallet info
+            Map<String, Object> walletData = new HashMap<>();
+            walletData.put("balance", balance);
+            response.put("wallet", walletData);
+
+            System.out.println("Verification V2 successful for vehicle: " + vehicle.getRegistrationNo());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("Verification V2 error: " + e.getMessage());
+            e.printStackTrace();
+
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("error", "Verification failed: " + e.getMessage());
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
     }
 
-    @PutMapping("/{id}")
-    public ResponseEntity<?> updateVehicle(@PathVariable Long id, @RequestBody Map<String, Object> payload) {
+    /**
+     * Complete fuel refill and mark token as used
+     * Endpoint: POST /api/vehicles/complete-refill
+     *
+     * @param payload - Contains tokenId, staffId, and fuelLogData
+     * @return Success response
+     */
+    @PostMapping("/complete-refill")
+    public ResponseEntity<?> completeRefill(@RequestBody Map<String, Object> payload) {
         try {
-            Vehicle vehicleDetails = new Vehicle();
-            vehicleDetails.setType(payload.get("type").toString());
-            vehicleDetails.setMake(payload.get("make").toString());
-            vehicleDetails.setModel(payload.get("model").toString());
-            vehicleDetails.setYear(payload.get("year").toString());
-            vehicleDetails.setRegistrationNo(payload.get("registrationNo").toString());
-            vehicleDetails.setFuelType(payload.get("fuelType").toString());
-            vehicleDetails.setEngineCC(payload.getOrDefault("engineCC", "").toString());
-            vehicleDetails.setColor(payload.getOrDefault("color", "").toString());
+            String tokenId = (String) payload.get("tokenId");
+            Long staffId = ((Number) payload.get("staffId")).longValue();
 
-            Vehicle updated = vehicleService.updateVehicle(id, vehicleDetails);
+            if (tokenId == null || tokenId.isEmpty()) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Token ID is required");
+                return ResponseEntity.badRequest().body(error);
+            }
+
+            // Mark token as used
+            qrTokenService.markTokenAsUsed(tokenId, staffId);
+
+            // Mark nonce as used to prevent replay
+            // Note: You would need to extract nonce from token or pass it in payload
 
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("message", "Vehicle updated successfully");
-            response.put("data", updated);
+            response.put("message", "Refill completed and token invalidated");
+
+            System.out.println("Token marked as used: " + tokenId + " by staff: " + staffId);
+
             return ResponseEntity.ok(response);
 
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
             error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+            return ResponseEntity.badRequest().body(error);
         }
     }
 
-    @DeleteMapping("/{id}")
-    public ResponseEntity<?> deleteVehicle(@PathVariable Long id) {
+    /**
+     * Invalidate/refresh old token manually
+     * Endpoint: DELETE /api/vehicles/qr-token/{tokenId}
+     *
+     * @param tokenId - Token ID to invalidate
+     * @return Success response
+     */
+    @DeleteMapping("/qr-token/{tokenId}")
+    public ResponseEntity<?> invalidateToken(@PathVariable String tokenId) {
         try {
-            vehicleService.deleteVehicle(id);
-            Map<String, String> response = new HashMap<>();
-            response.put("success", "true");
-            response.put("message", "Vehicle deleted successfully");
-            return ResponseEntity.ok(response);
-        } catch (RuntimeException e) {
-            Map<String, String> error = new HashMap<>();
-            error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
-        }
-    }
-
-    @PostMapping("/{id}/generate-pass")
-    public ResponseEntity<?> generateFuelPass(@PathVariable Long id) {
-        try {
-            Vehicle vehicle = vehicleService.generateFuelPass(id);
+            qrTokenService.invalidateToken(tokenId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("message", "Fuel Pass generated successfully");
-            response.put("data", vehicle);
-            return ResponseEntity.ok(response);
-        } catch (RuntimeException e) {
-            Map<String, String> error = new HashMap<>();
-            error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
-        }
-    }
-
-    @PostMapping("/regenerate-pass/{id}")
-    public ResponseEntity<?> regenerateFuelPass(@PathVariable Long id) {
-        try {
-            Vehicle vehicle = vehicleService.regenerateFuelPass(id);
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("message", "Fuel Pass regenerated successfully");
-            response.put("data", vehicle);
-            return ResponseEntity.ok(response);
-        } catch (RuntimeException e) {
-            Map<String, String> error = new HashMap<>();
-            error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
-        }
-    }
-
-    @GetMapping("/check-passcode/{passcode}")
-    public ResponseEntity<?> checkPasscodeExists(@PathVariable String passcode) {
-        try {
-            boolean exists = vehicleService.isPasscodeValid(passcode);
-            Map<String, Object> response = new HashMap<>();
-            response.put("valid", exists);
+            response.put("message", "Token invalidated successfully");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
             error.put("error", e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+            return ResponseEntity.badRequest().body(error);
+        }
+    }
+
+    /**
+     * Get token status (for debugging)
+     * Endpoint: GET /api/vehicles/qr-token/{tokenId}/status
+     *
+     * @param tokenId - Token ID to check
+     * @return Token status
+     */
+    @GetMapping("/qr-token/{tokenId}/status")
+    public ResponseEntity<?> getTokenStatus(@PathVariable String tokenId) {
+        try {
+            String key = "qr:token:" + tokenId;
+            Map<String, Object> response = new HashMap<>();
+            response.put("tokenId", tokenId);
+            response.put("exists", false);
+            response.put("used", false);
+            response.put("expired", true);
+
+            // This would require additional Redis methods in QrTokenService
+            // For now, return basic info
+            response.put("message", "Token status check endpoint");
+
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.badRequest().body(error);
         }
     }
 }
