@@ -9,22 +9,21 @@ import com.fuelix.repository.VehicleRepository;
 import com.fuelix.util.AESUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.Base64;
+import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 @Service
 public class QrTokenService {
-
-    @Autowired
-    private RedisTemplate<String, Object> redisTemplate;
 
     @Autowired
     private VehicleRepository vehicleRepository;
@@ -38,8 +37,9 @@ public class QrTokenService {
     @Value("${qr.signature.secret}")
     private String signatureSecret;
 
-    private static final String TOKEN_KEY_PREFIX = "qr:token:";
-    private static final String USED_NONCE_PREFIX = "qr:nonce:";
+    // In-memory storage
+    private final Map<String, QrTokenInfo> tokenStore = new ConcurrentHashMap<>();
+    private final Map<String, String> nonceStore = new ConcurrentHashMap<>();
 
     // Generate new QR token
     public QrTokenInfo generateToken(Long vehicleId, Long userId) throws Exception {
@@ -49,41 +49,43 @@ public class QrTokenService {
         Instant now = Instant.now();
         Instant expiresAt = now.plusSeconds(tokenExpirySeconds);
 
-        QrTokenInfo token = QrTokenInfo.builder()
-                .tokenId(tokenId)
-                .nonce(nonce)
-                .vehicleId(vehicleId)
-                .userId(userId)
-                .createdAt(now)
-                .expiresAt(expiresAt)
-                .used(false)
-                .build();
+        QrTokenInfo token = new QrTokenInfo();
+        token.setTokenId(tokenId);
+        token.setNonce(nonce);
+        token.setVehicleId(vehicleId);
+        token.setUserId(userId);
+        token.setCreatedAt(now);
+        token.setExpiresAt(expiresAt);
+        token.setUsed(false);
 
-        // Store in Redis with TTL
-        String key = TOKEN_KEY_PREFIX + tokenId;
-        redisTemplate.opsForHash().put(key, "tokenId", tokenId);
-        redisTemplate.opsForHash().put(key, "nonce", nonce);
-        redisTemplate.opsForHash().put(key, "vehicleId", vehicleId);
-        redisTemplate.opsForHash().put(key, "userId", userId);
-        redisTemplate.opsForHash().put(key, "createdAt", token.getCreatedAt().toString());
-        redisTemplate.opsForHash().put(key, "expiresAt", token.getExpiresAt().toString());
-        redisTemplate.opsForHash().put(key, "used", false);
-        redisTemplate.expire(key, tokenExpirySeconds, TimeUnit.SECONDS);
+        // Store in memory
+        tokenStore.put(tokenId, token);
+
+        // Auto cleanup after expiry
+        scheduleCleanup(tokenId, tokenExpirySeconds);
 
         return token;
     }
 
+    private void scheduleCleanup(String tokenId, int delaySeconds) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(delaySeconds * 1000L);
+                tokenStore.remove(tokenId);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+    }
+
     // Generate QR payload with signature
     public String generateQrPayload(QrTokenInfo token, Vehicle vehicle) throws Exception {
-        // Create payload
-        QrPayload payload = QrPayload.builder()
-                .passcode(vehicle.getFuelPassCode())
-                .tokenId(token.getTokenId())
-                .nonce(token.getNonce())
-                .timestamp(System.currentTimeMillis())
-                .build();
+        QrPayload payload = new QrPayload();
+        payload.setPasscode(vehicle.getFuelPassCode());
+        payload.setTokenId(token.getTokenId());
+        payload.setNonce(token.getNonce());
+        payload.setTimestamp(System.currentTimeMillis());
 
-        // Generate signature
         String signatureData = payload.getPasscode() + "|" +
                 payload.getTokenId() + "|" +
                 payload.getNonce() + "|" +
@@ -91,18 +93,15 @@ public class QrTokenService {
         String signature = generateHmacSignature(signatureData);
         payload.setSignature(signature);
 
-        // Convert to JSON and encrypt
         String jsonPayload = objectMapper.writeValueAsString(payload);
         String encryptedPayload = AESUtil.encrypt(jsonPayload);
 
-        // Build final QR string
         return String.format("FUELIX|2.0|%s|%s", encryptedPayload, signature);
     }
 
     // Validate QR code
     public QrVerificationResult validateQrCode(String qrData) {
         try {
-            // Parse QR data
             String[] parts = qrData.split("\\|");
             if (parts.length < 4 || !"FUELIX".equals(parts[0])) {
                 return QrVerificationResult.invalid("Invalid QR format");
@@ -111,11 +110,9 @@ public class QrTokenService {
             String encryptedPayload = parts[2];
             String receivedSignature = parts[3];
 
-            // Decrypt payload
             String jsonPayload = AESUtil.decrypt(encryptedPayload);
             QrPayload payload = objectMapper.readValue(jsonPayload, QrPayload.class);
 
-            // Verify signature
             String signatureData = payload.getPasscode() + "|" +
                     payload.getTokenId() + "|" +
                     payload.getNonce() + "|" +
@@ -126,66 +123,116 @@ public class QrTokenService {
                 return QrVerificationResult.invalid("Signature mismatch - QR may be tampered");
             }
 
-            // Check timestamp (prevent very old QRs)
             long age = System.currentTimeMillis() - payload.getTimestamp();
             if (age > 300000) {
                 return QrVerificationResult.invalid("QR code expired (timestamp)");
             }
 
-            // Validate token in Redis
-            String key = TOKEN_KEY_PREFIX + payload.getTokenId();
-            if (!Boolean.TRUE.equals(redisTemplate.hasKey(key))) {
+            // Check in-memory token
+            QrTokenInfo token = tokenStore.get(payload.getTokenId());
+            if (token == null) {
                 return QrVerificationResult.invalid("Token not found or expired");
             }
 
-            // Check if already used
-            Boolean used = (Boolean) redisTemplate.opsForHash().get(key, "used");
-            if (Boolean.TRUE.equals(used)) {
+            if (token.isUsed()) {
                 return QrVerificationResult.invalid("QR code already used");
             }
 
-            // Check if nonce is already used (prevent replay)
-            String nonceKey = USED_NONCE_PREFIX + payload.getNonce();
-            if (Boolean.TRUE.equals(redisTemplate.hasKey(nonceKey))) {
+            if (token.isExpired()) {
+                tokenStore.remove(payload.getTokenId());
+                return QrVerificationResult.invalid("Token expired");
+            }
+
+            // Check nonce
+            if (nonceStore.containsKey(payload.getNonce())) {
                 return QrVerificationResult.invalid("QR code already processed");
             }
 
-            // Get vehicle
-            Long vehicleId = (Long) redisTemplate.opsForHash().get(key, "vehicleId");
+            // Get vehicle - FIXED: Use Long.valueOf() to handle both Integer and Long
+            Long vehicleId = convertToLong(token.getVehicleId());
             Vehicle vehicle = vehicleRepository.findById(vehicleId)
                     .orElseThrow(() -> new RuntimeException("Vehicle not found"));
 
-            // Verify passcode matches
             if (!vehicle.getFuelPassCode().equals(payload.getPasscode())) {
                 return QrVerificationResult.invalid("Passcode mismatch");
             }
 
+            // Mark nonce as used
+            nonceStore.put(payload.getNonce(), "1");
+            scheduleNonceCleanup(payload.getNonce(), tokenExpirySeconds);
+
             return QrVerificationResult.success(vehicle, payload.getTokenId());
 
         } catch (Exception e) {
+            e.printStackTrace();
             return QrVerificationResult.invalid("Verification failed: " + e.getMessage());
         }
     }
 
-    // Mark token as used after successful fuel log
+    // Helper method to safely convert Object to Long
+    private Long convertToLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Long) {
+            return (Long) value;
+        }
+        if (value instanceof Integer) {
+            return ((Integer) value).longValue();
+        }
+        if (value instanceof String) {
+            return Long.parseLong((String) value);
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        throw new IllegalArgumentException("Cannot convert " + value.getClass() + " to Long");
+    }
+
+    // Helper method to safely convert Object to Boolean
+    private Boolean convertToBoolean(Object value) {
+        if (value == null) {
+            return false;
+        }
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof String) {
+            return Boolean.parseBoolean((String) value);
+        }
+        return false;
+    }
+
+    private void scheduleNonceCleanup(String nonce, int delaySeconds) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(delaySeconds * 1000L);
+                nonceStore.remove(nonce);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+    }
+
+    // Mark token as used
     public void markTokenAsUsed(String tokenId, Long staffId) {
-        String key = TOKEN_KEY_PREFIX + tokenId;
-        redisTemplate.opsForHash().put(key, "used", true);
-        redisTemplate.opsForHash().put(key, "usedBy", staffId);
-        redisTemplate.opsForHash().put(key, "usedAt", Instant.now().toString());
-        redisTemplate.expire(key, 60, TimeUnit.SECONDS);
+        QrTokenInfo token = tokenStore.get(tokenId);
+        if (token != null) {
+            token.setUsed(true);
+            token.setUsedBy(String.valueOf(staffId));
+            token.setUsedAt(Instant.now());
+        }
     }
 
-    // Mark nonce as used (prevent replay)
+    // Mark nonce as used
     public void markNonceAsUsed(String nonce) {
-        String key = USED_NONCE_PREFIX + nonce;
-        redisTemplate.opsForValue().set(key, "1", tokenExpirySeconds, TimeUnit.SECONDS);
+        nonceStore.put(nonce, "1");
+        scheduleNonceCleanup(nonce, tokenExpirySeconds);
     }
 
-    // Invalidate token manually (refresh)
+    // Invalidate token
     public void invalidateToken(String tokenId) {
-        String key = TOKEN_KEY_PREFIX + tokenId;
-        redisTemplate.delete(key);
+        tokenStore.remove(tokenId);
     }
 
     private String generateHmacSignature(String data) throws Exception {
