@@ -45,6 +45,8 @@ public class FamilyController {
     @Autowired
     private JwtService jwtService;
 
+    private static final int MAX_MEMBERS = 4;
+
     private Long getUserIdFromToken(String authHeader) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             return null;
@@ -148,6 +150,11 @@ public class FamilyController {
                 throw new RuntimeException("Only family owner can invite members");
             }
 
+            long activeMemberCount = familyMemberRepository.countByFamilyIdAndIsActiveTrue(familyId);
+            if (activeMemberCount >= MAX_MEMBERS) {
+                throw new RuntimeException("Family member limit reached (Max " + MAX_MEMBERS + " members)");
+            }
+
             User user = userRepository.findByEmail(emailOrMobile)
                     .orElse(null);
 
@@ -167,8 +174,8 @@ public class FamilyController {
             FamilyMember member = new FamilyMember(familyId, user.getId(), "MEMBER", userId);
 
             Map<String, Boolean> defaultPermissions = new HashMap<>();
-            defaultPermissions.put("can_refuel", true);
-            defaultPermissions.put("can_topup", true);
+            defaultPermissions.put("can_refuel", false);
+            defaultPermissions.put("can_topup", false);
             defaultPermissions.put("can_view_wallet", true);
             defaultPermissions.put("can_share_vehicle", false);
             member.setPermissions(convertMapToJson(defaultPermissions));
@@ -377,6 +384,7 @@ public class FamilyController {
             result.put("myRole", currentMembership.getRole());
             result.put("members", memberList);
             result.put("myPermissions", parseJsonToMap(currentMembership.getPermissions()));
+            result.put("maxMembers", MAX_MEMBERS);
 
             return ResponseEntity.ok(Map.of("success", true, "data", result));
         } catch (Exception e) {
@@ -466,6 +474,7 @@ public class FamilyController {
             Long vehicleId = Long.parseLong(request.get("vehicleId").toString());
             Long sharedWithUserId = Long.parseLong(request.get("sharedWithUserId").toString());
 
+            // Verify the user owns the vehicle
             Vehicle vehicle = vehicleRepository.findById(vehicleId)
                     .orElseThrow(() -> new RuntimeException("Vehicle not found"));
 
@@ -473,6 +482,7 @@ public class FamilyController {
                 throw new RuntimeException("You don't own this vehicle");
             }
 
+            // Check if both users are in the same family
             FamilyMember ownerMember = familyMemberRepository.findByUserId(userId).stream()
                     .filter(m -> m.getIsActive())
                     .findFirst()
@@ -483,10 +493,12 @@ public class FamilyController {
                     .findFirst()
                     .orElseThrow(() -> new RuntimeException("User not in your family"));
 
+            // Check if vehicle already shared with this user
             if (sharedVehicleRepository.existsByVehicleIdAndSharedWithUserId(vehicleId, sharedWithUserId)) {
                 throw new RuntimeException("Vehicle already shared with this user");
             }
 
+            // Default permissions for shared vehicle
             Map<String, Boolean> defaultPermissions = new HashMap<>();
             defaultPermissions.put("can_refuel", true);
             defaultPermissions.put("can_view_quota", true);
@@ -739,6 +751,43 @@ public class FamilyController {
             return ResponseEntity.ok(Map.of("canRefuel", canRefuel));
         } catch (Exception e) {
             return ResponseEntity.ok(Map.of("canRefuel", false));
+        }
+    }
+
+    @GetMapping("/can-share-vehicle")
+    public ResponseEntity<?> canShareVehicle(@RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            List<FamilyMember> memberships = familyMemberRepository.findByUserId(userId);
+            if (memberships.isEmpty()) {
+                return ResponseEntity.ok(Map.of("canShareVehicle", false));
+            }
+
+            FamilyMember currentMembership = memberships.stream()
+                    .filter(m -> m.getIsActive())
+                    .findFirst()
+                    .orElse(null);
+
+            if (currentMembership == null) {
+                return ResponseEntity.ok(Map.of("canShareVehicle", false));
+            }
+
+            // OWNER always has share vehicle permission
+            if ("OWNER".equals(currentMembership.getRole())) {
+                return ResponseEntity.ok(Map.of("canShareVehicle", true));
+            }
+
+            // For MEMBER, check permissions
+            Map<String, Boolean> permissions = parseJsonToMap(currentMembership.getPermissions());
+            boolean canShareVehicle = permissions.getOrDefault("can_share_vehicle", false);
+
+            return ResponseEntity.ok(Map.of("canShareVehicle", canShareVehicle));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("canShareVehicle", false));
         }
     }
 }

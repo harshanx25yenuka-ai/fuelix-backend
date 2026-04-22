@@ -13,4 +13,5 @@ public interface FamilyMemberRepository extends JpaRepository<FamilyMember, Long
     Optional<FamilyMember> findByFamilyIdAndUserIdAndIsActiveFalse(Long familyId, Long userId);
     boolean existsByFamilyIdAndUserId(Long familyId, Long userId);
     boolean existsByFamilyIdAndUserIdAndIsActiveFalse(Long familyId, Long userId);
+    long countByFamilyIdAndIsActiveTrue(Long familyId);
 }
