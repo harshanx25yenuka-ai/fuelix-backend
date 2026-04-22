@@ -671,4 +671,22 @@ public class VehicleController {
             return ResponseEntity.badRequest().body(error);
         }
     }
+
+    @GetMapping("/has-vehicle-pass")
+    public ResponseEntity<?> hasVehiclePass(@RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            List<Vehicle> vehicles = vehicleService.getUserVehicles(userId);
+            boolean hasVehiclePass = vehicles.stream()
+                    .anyMatch(v -> v.getFuelPassCode() != null && !v.getFuelPassCode().isEmpty());
+
+            return ResponseEntity.ok(Map.of("hasVehiclePass", hasVehiclePass));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("hasVehiclePass", false));
+        }
+    }
 }

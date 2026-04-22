@@ -44,7 +44,6 @@ public class FamilyService {
     private static final String OWNER_ROLE = "OWNER";
     private static final String MEMBER_ROLE = "MEMBER";
 
-    // Default permissions for members
     private static final String DEFAULT_MEMBER_PERMISSIONS = "{\"can_refuel\":true,\"can_view_quota\":true,\"can_view_wallet\":true,\"can_topup\":true}";
     private static final String DEFAULT_SHARED_VEHICLE_PERMISSIONS = "{\"can_refuel\":true,\"can_view_quota\":true}";
 
@@ -52,7 +51,6 @@ public class FamilyService {
 
     @Transactional
     public Family createFamily(String familyName, Long userId) {
-        // Check if user already has a family
         if (familyRepository.existsByCreatedBy(userId)) {
             throw new RuntimeException("You already have a family");
         }
@@ -60,13 +58,12 @@ public class FamilyService {
         Family family = new Family(familyName, userId);
         Family savedFamily = familyRepository.save(family);
 
-        // Create shared wallet for family
         SharedWallet wallet = new SharedWallet(savedFamily.getId(), userId);
         sharedWalletRepository.save(wallet);
 
-        // Add creator as OWNER
         FamilyMember owner = new FamilyMember(savedFamily.getId(), userId, OWNER_ROLE, userId);
-        owner.setPermissions("{}"); // Owner has all permissions implicitly
+        owner.setPermissions("{}");
+        owner.setIsActive(true);
         familyMemberRepository.save(owner);
 
         return savedFamily;
@@ -77,7 +74,6 @@ public class FamilyService {
         Family family = familyRepository.findById(familyId)
                 .orElseThrow(() -> new RuntimeException("Family not found"));
 
-        // Verify inviter is the owner
         FamilyMember inviter = familyMemberRepository.findByFamilyIdAndUserId(familyId, invitedBy)
                 .orElseThrow(() -> new RuntimeException("Not a family member"));
 
@@ -85,25 +81,31 @@ public class FamilyService {
             throw new RuntimeException("Only family owner can invite members");
         }
 
-        // Find user by email or mobile
         User user = userRepository.findByEmail(emailOrMobile)
-                .orElseGet(() -> userRepository.findByMobile(emailOrMobile)
-                        .orElseThrow(() -> new RuntimeException("User not found")));
+                .orElse(null);
 
-        // Check if already a member
+        if (user == null) {
+            user = userRepository.findByMobile(emailOrMobile)
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+        }
+
         if (familyMemberRepository.existsByFamilyIdAndUserId(familyId, user.getId())) {
             throw new RuntimeException("User already in family");
         }
 
+        if (familyMemberRepository.existsByFamilyIdAndUserIdAndIsActiveFalse(familyId, user.getId())) {
+            throw new RuntimeException("Invitation already sent. User needs to accept.");
+        }
+
         FamilyMember member = new FamilyMember(familyId, user.getId(), MEMBER_ROLE, invitedBy);
         member.setPermissions(DEFAULT_MEMBER_PERMISSIONS);
+        member.setIsActive(false);
         FamilyMember savedMember = familyMemberRepository.save(member);
 
-        // Send notification
         notificationService.createPrivateNotification(
                 user.getId(),
                 "Family Invitation",
-                "You've been invited to join '" + family.getFamilyName() + "' family",
+                "You've been invited to join '" + family.getFamilyName() + "' family. Tap to accept or decline.",
                 Map.of("type", "FAMILY_INVITE", "familyId", familyId, "familyName", family.getFamilyName())
         );
 
@@ -111,21 +113,54 @@ public class FamilyService {
     }
 
     @Transactional
-    public void acceptInvitation(Long familyId, Long userId) {
-        FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, userId)
-                .orElseThrow(() -> new RuntimeException("Invitation not found"));
+    public FamilyMember acceptInvitation(Long familyId, Long userId) {
+        FamilyMember member = familyMemberRepository.findByFamilyIdAndUserIdAndIsActiveFalse(familyId, userId)
+                .orElseThrow(() -> new RuntimeException("No pending invitation found"));
 
         member.setIsActive(true);
-        familyMemberRepository.save(member);
+        member.setJoinedAt(LocalDateTime.now());
+        FamilyMember savedMember = familyMemberRepository.save(member);
 
-        // Send notification to owner
         Family family = familyRepository.findById(familyId).get();
         notificationService.createPrivateNotification(
                 family.getCreatedBy(),
                 "Member Joined",
                 "A new member has joined your family",
-                Map.of("type", "MEMBER_JOINED", "userId", userId)
+                Map.of("type", "MEMBER_JOINED", "userId", userId, "familyId", familyId)
         );
+
+        return savedMember;
+    }
+
+    @Transactional
+    public void declineInvitation(Long familyId, Long userId) {
+        FamilyMember member = familyMemberRepository.findByFamilyIdAndUserIdAndIsActiveFalse(familyId, userId)
+                .orElseThrow(() -> new RuntimeException("No pending invitation found"));
+
+        familyMemberRepository.delete(member);
+    }
+
+    public List<Map<String, Object>> getPendingInvitations(Long userId) {
+        List<FamilyMember> pendingMembers = familyMemberRepository.findByUserIdAndIsActiveFalse(userId);
+
+        List<Map<String, Object>> invitations = new ArrayList<>();
+
+        for (FamilyMember member : pendingMembers) {
+            Family family = familyRepository.findById(member.getFamilyId()).orElse(null);
+            if (family == null) continue;
+
+            User invitedByUser = userRepository.findById(member.getJoinedBy()).orElse(null);
+
+            Map<String, Object> invitation = new HashMap<>();
+            invitation.put("familyId", family.getId());
+            invitation.put("familyName", family.getFamilyName());
+            invitation.put("invitedBy", invitedByUser != null ? invitedByUser.getFirstName() + " " + invitedByUser.getLastName() : "Unknown");
+            invitation.put("invitedAt", member.getJoinedAt());
+
+            invitations.add(invitation);
+        }
+
+        return invitations;
     }
 
     @Transactional
@@ -140,12 +175,10 @@ public class FamilyService {
         FamilyMember toRemove = familyMemberRepository.findByFamilyIdAndUserId(familyId, memberToRemoveId)
                 .orElseThrow(() -> new RuntimeException("Member not found"));
 
-        // Cannot remove owner
         if (OWNER_ROLE.equals(toRemove.getRole())) {
             throw new RuntimeException("Cannot remove family owner");
         }
 
-        // Remove all shared vehicles for this member
         List<SharedVehicle> sharedVehicles = sharedVehicleRepository.findBySharedWithUserIdAndIsActiveTrue(memberToRemoveId);
         for (SharedVehicle sv : sharedVehicles) {
             sv.setIsActive(false);
@@ -160,7 +193,6 @@ public class FamilyService {
 
     @Transactional
     public SharedVehicle shareVehicle(Long vehicleId, Long sharedWithUserId, Long ownerUserId) {
-        // Verify ownership
         Vehicle vehicle = vehicleRepository.findById(vehicleId)
                 .orElseThrow(() -> new RuntimeException("Vehicle not found"));
 
@@ -168,7 +200,6 @@ public class FamilyService {
             throw new RuntimeException("You don't own this vehicle");
         }
 
-        // Verify both users are in same family
         FamilyMember ownerMember = familyMemberRepository.findByUserId(ownerUserId).stream()
                 .filter(m -> m.getIsActive())
                 .findFirst()
@@ -179,7 +210,6 @@ public class FamilyService {
                 .findFirst()
                 .orElseThrow(() -> new RuntimeException("User not in your family"));
 
-        // Check if already shared
         if (sharedVehicleRepository.existsByVehicleIdAndSharedWithUserId(vehicleId, sharedWithUserId)) {
             throw new RuntimeException("Vehicle already shared with this user");
         }
@@ -187,7 +217,6 @@ public class FamilyService {
         SharedVehicle shared = new SharedVehicle(vehicleId, ownerUserId, sharedWithUserId, DEFAULT_SHARED_VEHICLE_PERMISSIONS);
         SharedVehicle saved = sharedVehicleRepository.save(shared);
 
-        // Send notification
         User owner = userRepository.findById(ownerUserId).get();
         notificationService.createPrivateNotification(
                 sharedWithUserId,
@@ -264,7 +293,6 @@ public class FamilyService {
         FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, userId)
                 .orElseThrow(() -> new RuntimeException("Not a family member"));
 
-        // Check permission
         Map<String, Boolean> permissions = parseJsonToMap(member.getPermissions());
         if (!permissions.getOrDefault("can_topup", false) && !OWNER_ROLE.equals(member.getRole())) {
             throw new RuntimeException("You don't have permission to top up");
@@ -277,13 +305,11 @@ public class FamilyService {
         wallet.setUpdatedAt(LocalDateTime.now());
         SharedWallet updated = sharedWalletRepository.save(wallet);
 
-        // Record transaction
         SharedWalletTransaction transaction = new SharedWalletTransaction(
                 wallet.getId(), userId, amount, "TOPUP", reference
         );
         sharedWalletTransactionRepository.save(transaction);
 
-        // Send notification to all family members
         List<FamilyMember> members = familyMemberRepository.findByFamilyIdAndIsActiveTrue(familyId);
         User user = userRepository.findById(userId).get();
 
@@ -306,7 +332,6 @@ public class FamilyService {
         FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, userId)
                 .orElseThrow(() -> new RuntimeException("Not a family member"));
 
-        // Check permission
         Map<String, Boolean> permissions = parseJsonToMap(member.getPermissions());
         if (!permissions.getOrDefault("can_refuel", false) && !OWNER_ROLE.equals(member.getRole())) {
             throw new RuntimeException("You don't have permission to use family wallet");
@@ -323,7 +348,6 @@ public class FamilyService {
         wallet.setUpdatedAt(LocalDateTime.now());
         SharedWallet updated = sharedWalletRepository.save(wallet);
 
-        // Record transaction
         SharedWalletTransaction transaction = new SharedWalletTransaction(
                 wallet.getId(), userId, amount, "REFUEL", reference
         );

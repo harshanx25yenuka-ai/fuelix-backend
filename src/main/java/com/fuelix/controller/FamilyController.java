@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -30,8 +31,6 @@ public class FamilyController {
         String token = authHeader.substring(7);
         return jwtService.extractUserId(token);
     }
-
-    // ==================== FAMILY MANAGEMENT ====================
 
     @PostMapping("/create")
     public ResponseEntity<?> createFamily(@RequestBody Map<String, String> request,
@@ -81,7 +80,7 @@ public class FamilyController {
     }
 
     @PostMapping("/accept")
-    public ResponseEntity<?> acceptInvitation(@RequestBody Map<String, String> request,
+    public ResponseEntity<?> acceptInvitation(@RequestBody Map<String, Long> request,
                                               @RequestHeader("Authorization") String authHeader) {
         try {
             Long userId = getUserIdFromToken(authHeader);
@@ -89,12 +88,52 @@ public class FamilyController {
                 return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
             }
 
-            Long familyId = Long.parseLong(request.get("familyId"));
+            Long familyId = request.get("familyId");
             familyService.acceptInvitation(familyId, userId);
 
             return ResponseEntity.ok(Map.of(
                     "success", true,
                     "message", "Joined family successfully"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/decline")
+    public ResponseEntity<?> declineInvitation(@RequestBody Map<String, Long> request,
+                                               @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            Long familyId = request.get("familyId");
+            familyService.declineInvitation(familyId, userId);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Invitation declined"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/pending-invitations")
+    public ResponseEntity<?> getPendingInvitations(@RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            List<Map<String, Object>> invitations = familyService.getPendingInvitations(userId);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "data", invitations
             ));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -138,8 +177,6 @@ public class FamilyController {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
-
-    // ==================== SHARED VEHICLE MANAGEMENT ====================
 
     @PostMapping("/share-vehicle")
     public ResponseEntity<?> shareVehicle(@RequestBody Map<String, Object> request,
@@ -219,8 +256,6 @@ public class FamilyController {
         }
     }
 
-    // ==================== SHARED WALLET MANAGEMENT ====================
-
     @PostMapping("/wallet/topup")
     public ResponseEntity<?> topUpSharedWallet(@RequestBody Map<String, Object> request,
                                                @RequestHeader("Authorization") String authHeader) {
@@ -264,8 +299,6 @@ public class FamilyController {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
-
-    // ==================== PERMISSION CHECK ====================
 
     @GetMapping("/can-refuel/{vehicleId}")
     public ResponseEntity<?> canRefuelSharedVehicle(@PathVariable Long vehicleId,
