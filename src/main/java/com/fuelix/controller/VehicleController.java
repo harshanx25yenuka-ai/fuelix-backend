@@ -2,12 +2,10 @@ package com.fuelix.controller;
 
 import com.fuelix.config.JwtService;
 import com.fuelix.dto.QrGenerationResponse;
-import com.fuelix.model.FuelLog;
 import com.fuelix.model.QrTokenInfo;
 import com.fuelix.model.QrVerificationResult;
 import com.fuelix.model.Quota;
 import com.fuelix.model.Vehicle;
-import com.fuelix.model.Wallet;
 import com.fuelix.service.FuelLogService;
 import com.fuelix.service.FuelPriceService;
 import com.fuelix.service.NotificationService;
@@ -53,17 +51,7 @@ public class VehicleController {
     @Autowired
     private JwtService jwtService;
 
-    // Helper method to extract user ID from token
     private Long getUserIdFromToken(String authHeader) {
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            return null;
-        }
-        String token = authHeader.substring(7);
-        return jwtService.extractUserId(token);
-    }
-
-    // Helper method to extract staff ID from token
-    private Long getStaffIdFromToken(String authHeader) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             return null;
         }
@@ -335,12 +323,10 @@ public class VehicleController {
             System.out.println("=== Staff QR Verification (Legacy) ===");
             System.out.println("Passcode: " + passcode);
 
-            // Step 1: Verify fuel pass code
             Vehicle vehicle = vehicleService.getVehicleByPassCode(passcode);
 
             Map<String, Object> response = new HashMap<>();
 
-            // Step 1 response
             Map<String, Object> step1 = new HashMap<>();
             step1.put("success", true);
             step1.put("message", "Fuel pass code verified");
@@ -352,7 +338,6 @@ public class VehicleController {
             step1.put("model", vehicle.getModel());
             response.put("step1", step1);
 
-            // Step 2: Check available quota
             Quota quota = quotaService.getCurrentQuota(vehicle.getId(), vehicle.getType());
             double remainingQuota = quota.getRemainingLitres();
 
@@ -376,7 +361,6 @@ public class VehicleController {
             step2.put("usedLitres", quota.getUsedLitres());
             response.put("step2", step2);
 
-            // Step 3: Check wallet balance
             Double balance = walletService.getBalance(vehicle.getUserId());
 
             Map<String, Object> step3 = new HashMap<>();
@@ -395,7 +379,6 @@ public class VehicleController {
             step3.put("balance", balance);
             response.put("step3", step3);
 
-            // Step 4: Load all fuel pass data
             Map<String, Object> step4 = new HashMap<>();
             step4.put("success", true);
             step4.put("message", "Data loaded successfully");
@@ -436,16 +419,8 @@ public class VehicleController {
         }
     }
 
-    // ==================== DYNAMIC QR TOKEN APIs (NEW - V2) ====================
+    // ==================== DYNAMIC QR TOKEN APIs (V2) ====================
 
-    /**
-     * Generate dynamic QR token for a vehicle
-     * Endpoint: POST /api/vehicles/{vehicleId}/dynamic-qr
-     *
-     * @param vehicleId - ID of the vehicle
-     * @param authHeader - Bearer token for authentication
-     * @return QR data string with token ID and expiry info
-     */
     @PostMapping("/{vehicleId}/dynamic-qr")
     public ResponseEntity<?> generateDynamicQr(
             @PathVariable Long vehicleId,
@@ -458,7 +433,6 @@ public class VehicleController {
                 return ResponseEntity.status(401).body(error);
             }
 
-            // Verify vehicle belongs to user
             Vehicle vehicle = vehicleService.getVehicleById(vehicleId);
             if (!vehicle.getUserId().equals(userId)) {
                 Map<String, String> error = new HashMap<>();
@@ -466,17 +440,13 @@ public class VehicleController {
                 return ResponseEntity.status(403).body(error);
             }
 
-            // Check if vehicle has fuel pass
             if (vehicle.getFuelPassCode() == null || vehicle.getFuelPassCode().isEmpty()) {
                 Map<String, String> error = new HashMap<>();
                 error.put("error", "Please generate Fuel Pass first");
                 return ResponseEntity.status(400).body(error);
             }
 
-            // Generate token
             QrTokenInfo token = qrTokenService.generateToken(vehicleId, userId);
-
-            // Generate QR payload
             String qrData = qrTokenService.generateQrPayload(token, vehicle);
 
             QrGenerationResponse response = QrGenerationResponse.builder()
@@ -496,13 +466,6 @@ public class VehicleController {
         }
     }
 
-    /**
-     * Staff verify QR code (Version 2 with dynamic token)
-     * Endpoint: POST /api/vehicles/staff-verify-v2
-     *
-     * @param request - Contains qrData string
-     * @return Vehicle details if verification succeeds
-     */
     @PostMapping("/staff-verify-v2")
     public ResponseEntity<?> staffVerifyQrV2(@RequestBody Map<String, String> request) {
         try {
@@ -516,9 +479,7 @@ public class VehicleController {
             }
 
             System.out.println("=== Staff QR Verification V2 ===");
-            System.out.println("QR Data length: " + qrData.length());
 
-            // Validate QR
             QrVerificationResult result = qrTokenService.validateQrCode(qrData);
 
             if (!result.isValid()) {
@@ -529,14 +490,9 @@ public class VehicleController {
             }
 
             Vehicle vehicle = result.getVehicle();
-
-            // Get quota info
             Quota quota = quotaService.getCurrentQuota(vehicle.getId(), vehicle.getType());
-
-            // Get wallet balance
             Double balance = walletService.getBalance(vehicle.getUserId());
 
-            // Build response with vehicle details
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("tokenId", result.getTokenId());
@@ -554,19 +510,15 @@ public class VehicleController {
             vehicleData.put("color", vehicle.getColor() != null ? vehicle.getColor() : "");
             response.put("vehicle", vehicleData);
 
-            // Add quota info
             Map<String, Object> quotaData = new HashMap<>();
             quotaData.put("remainingQuota", quota.getRemainingLitres());
             quotaData.put("quotaLitres", quota.getQuotaLitres());
             quotaData.put("usedLitres", quota.getUsedLitres());
             response.put("quota", quotaData);
 
-            // Add wallet info
             Map<String, Object> walletData = new HashMap<>();
             walletData.put("balance", balance);
             response.put("wallet", walletData);
-
-            System.out.println("Verification V2 successful for vehicle: " + vehicle.getRegistrationNo());
 
             return ResponseEntity.ok(response);
 
@@ -581,13 +533,6 @@ public class VehicleController {
         }
     }
 
-    /**
-     * Complete fuel refill and mark token as used
-     * Endpoint: POST /api/vehicles/complete-refill
-     *
-     * @param payload - Contains tokenId, staffId, and fuelLogData
-     * @return Success response
-     */
     @PostMapping("/complete-refill")
     public ResponseEntity<?> completeRefill(@RequestBody Map<String, Object> payload) {
         try {
@@ -600,17 +545,11 @@ public class VehicleController {
                 return ResponseEntity.badRequest().body(error);
             }
 
-            // Mark token as used
             qrTokenService.markTokenAsUsed(tokenId, staffId);
-
-            // Mark nonce as used to prevent replay
-            // Note: You would need to extract nonce from token or pass it in payload
 
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Refill completed and token invalidated");
-
-            System.out.println("Token marked as used: " + tokenId + " by staff: " + staffId);
 
             return ResponseEntity.ok(response);
 
@@ -621,13 +560,6 @@ public class VehicleController {
         }
     }
 
-    /**
-     * Invalidate/refresh old token manually
-     * Endpoint: DELETE /api/vehicles/qr-token/{tokenId}
-     *
-     * @param tokenId - Token ID to invalidate
-     * @return Success response
-     */
     @DeleteMapping("/qr-token/{tokenId}")
     public ResponseEntity<?> invalidateToken(@PathVariable String tokenId) {
         try {
@@ -643,34 +575,7 @@ public class VehicleController {
         }
     }
 
-    /**
-     * Get token status (for debugging)
-     * Endpoint: GET /api/vehicles/qr-token/{tokenId}/status
-     *
-     * @param tokenId - Token ID to check
-     * @return Token status
-     */
-    @GetMapping("/qr-token/{tokenId}/status")
-    public ResponseEntity<?> getTokenStatus(@PathVariable String tokenId) {
-        try {
-            String key = "qr:token:" + tokenId;
-            Map<String, Object> response = new HashMap<>();
-            response.put("tokenId", tokenId);
-            response.put("exists", false);
-            response.put("used", false);
-            response.put("expired", true);
-
-            // This would require additional Redis methods in QrTokenService
-            // For now, return basic info
-            response.put("message", "Token status check endpoint");
-
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            Map<String, String> error = new HashMap<>();
-            error.put("error", e.getMessage());
-            return ResponseEntity.badRequest().body(error);
-        }
-    }
+    // ==================== FAMILY SHARING SUPPORT ====================
 
     @GetMapping("/has-vehicle-pass")
     public ResponseEntity<?> hasVehiclePass(@RequestHeader("Authorization") String authHeader) {
@@ -687,6 +592,24 @@ public class VehicleController {
             return ResponseEntity.ok(Map.of("hasVehiclePass", hasVehiclePass));
         } catch (Exception e) {
             return ResponseEntity.ok(Map.of("hasVehiclePass", false));
+        }
+    }
+
+    @GetMapping("/has-vehicle-with-fuel-pass")
+    public ResponseEntity<?> hasVehicleWithFuelPass(@RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            List<Vehicle> vehicles = vehicleService.getUserVehicles(userId);
+            boolean hasVehicleWithFuelPass = vehicles.stream()
+                    .anyMatch(v -> v.getFuelPassCode() != null && !v.getFuelPassCode().isEmpty());
+
+            return ResponseEntity.ok(Map.of("hasVehicleWithFuelPass", hasVehicleWithFuelPass));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("hasVehicleWithFuelPass", false));
         }
     }
 }
