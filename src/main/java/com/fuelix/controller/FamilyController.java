@@ -474,7 +474,6 @@ public class FamilyController {
             Long vehicleId = Long.parseLong(request.get("vehicleId").toString());
             Long sharedWithUserId = Long.parseLong(request.get("sharedWithUserId").toString());
 
-            // Verify the user owns the vehicle
             Vehicle vehicle = vehicleRepository.findById(vehicleId)
                     .orElseThrow(() -> new RuntimeException("Vehicle not found"));
 
@@ -482,7 +481,6 @@ public class FamilyController {
                 throw new RuntimeException("You don't own this vehicle");
             }
 
-            // Check if both users are in the same family
             FamilyMember ownerMember = familyMemberRepository.findByUserId(userId).stream()
                     .filter(m -> m.getIsActive())
                     .findFirst()
@@ -493,12 +491,10 @@ public class FamilyController {
                     .findFirst()
                     .orElseThrow(() -> new RuntimeException("User not in your family"));
 
-            // Check if vehicle already shared with this user
             if (sharedVehicleRepository.existsByVehicleIdAndSharedWithUserId(vehicleId, sharedWithUserId)) {
                 throw new RuntimeException("Vehicle already shared with this user");
             }
 
-            // Default permissions for shared vehicle
             Map<String, Boolean> defaultPermissions = new HashMap<>();
             defaultPermissions.put("can_refuel", true);
             defaultPermissions.put("can_view_quota", true);
@@ -611,9 +607,20 @@ public class FamilyController {
                 Map<String, Object> vehicleMap = new HashMap<>();
                 vehicleMap.put("vehicleId", vehicle.getId());
                 vehicleMap.put("registrationNo", vehicle.getRegistrationNo());
+                vehicleMap.put("make", vehicle.getMake());
+                vehicleMap.put("model", vehicle.getModel());
+                vehicleMap.put("type", vehicle.getType());
+                vehicleMap.put("fuelType", vehicle.getFuelType());
+                vehicleMap.put("ownerId", shared.getOwnerUserId());
+                vehicleMap.put("ownerName", "You");
                 vehicleMap.put("sharedWithUserId", shared.getSharedWithUserId());
                 vehicleMap.put("sharedWithName", sharedWith != null ? sharedWith.getFirstName() + " " + sharedWith.getLastName() : "Unknown");
                 vehicleMap.put("sharedAt", shared.getSharedAt());
+
+                Map<String, Boolean> permissions = new HashMap<>();
+                permissions.put("can_refuel", true);
+                permissions.put("can_view_quota", true);
+                vehicleMap.put("permissions", permissions);
 
                 result.add(vehicleMap);
             }
@@ -776,12 +783,10 @@ public class FamilyController {
                 return ResponseEntity.ok(Map.of("canShareVehicle", false));
             }
 
-            // OWNER always has share vehicle permission
             if ("OWNER".equals(currentMembership.getRole())) {
                 return ResponseEntity.ok(Map.of("canShareVehicle", true));
             }
 
-            // For MEMBER, check permissions
             Map<String, Boolean> permissions = parseJsonToMap(currentMembership.getPermissions());
             boolean canShareVehicle = permissions.getOrDefault("can_share_vehicle", false);
 
