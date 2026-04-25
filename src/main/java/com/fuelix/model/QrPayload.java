@@ -6,33 +6,36 @@ public class QrPayload {
     private String nonce;
     private long timestamp;
     private String signature;
+    private String tokenType;
 
     public QrPayload() {}
 
-    public QrPayload(String passcode, String tokenId, String nonce, long timestamp, String signature) {
+    public QrPayload(String passcode, String tokenId, String nonce, long timestamp, String signature, String tokenType) {
         this.passcode = passcode;
         this.tokenId = tokenId;
         this.nonce = nonce;
         this.timestamp = timestamp;
         this.signature = signature;
+        this.tokenType = tokenType;
     }
 
-    // Builder pattern
     public static class Builder {
         private String passcode;
         private String tokenId;
         private String nonce;
         private long timestamp;
         private String signature;
+        private String tokenType;
 
         public Builder passcode(String passcode) { this.passcode = passcode; return this; }
         public Builder tokenId(String tokenId) { this.tokenId = tokenId; return this; }
         public Builder nonce(String nonce) { this.nonce = nonce; return this; }
         public Builder timestamp(long timestamp) { this.timestamp = timestamp; return this; }
         public Builder signature(String signature) { this.signature = signature; return this; }
+        public Builder tokenType(String tokenType) { this.tokenType = tokenType; return this; }
 
         public QrPayload build() {
-            return new QrPayload(passcode, tokenId, nonce, timestamp, signature);
+            return new QrPayload(passcode, tokenId, nonce, timestamp, signature, tokenType);
         }
     }
 
@@ -51,4 +54,6 @@ public class QrPayload {
     public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
     public String getSignature() { return signature; }
     public void setSignature(String signature) { this.signature = signature; }
+    public String getTokenType() { return tokenType; }
+    public void setTokenType(String tokenType) { this.tokenType = tokenType; }
 }

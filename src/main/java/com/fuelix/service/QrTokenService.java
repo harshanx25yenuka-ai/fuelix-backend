@@ -5,16 +5,17 @@ import com.fuelix.model.QrPayload;
 import com.fuelix.model.QrTokenInfo;
 import com.fuelix.model.QrVerificationResult;
 import com.fuelix.model.Vehicle;
+import com.fuelix.model.SharedVehicle;
 import com.fuelix.repository.VehicleRepository;
+import com.fuelix.repository.SharedVehicleRepository;
 import com.fuelix.util.AESUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +30,9 @@ public class QrTokenService {
     private VehicleRepository vehicleRepository;
 
     @Autowired
+    private SharedVehicleRepository sharedVehicleRepository;
+
+    @Autowired
     private ObjectMapper objectMapper;
 
     @Value("${qr.token.expiry.seconds:300}")
@@ -37,11 +41,10 @@ public class QrTokenService {
     @Value("${qr.signature.secret}")
     private String signatureSecret;
 
-    // In-memory storage
     private final Map<String, QrTokenInfo> tokenStore = new ConcurrentHashMap<>();
     private final Map<String, String> nonceStore = new ConcurrentHashMap<>();
 
-    // Generate new QR token
+    // Generate token for OWNER
     public QrTokenInfo generateToken(Long vehicleId, Long userId) throws Exception {
         String tokenId = UUID.randomUUID().toString();
         String nonce = UUID.randomUUID().toString();
@@ -57,25 +60,47 @@ public class QrTokenService {
         token.setCreatedAt(now);
         token.setExpiresAt(expiresAt);
         token.setUsed(false);
+        token.setTokenType("OWNER");
 
-        // Store in memory
         tokenStore.put(tokenId, token);
-
-        // Auto cleanup after expiry
         scheduleCleanup(tokenId, tokenExpirySeconds);
 
         return token;
     }
 
-    private void scheduleCleanup(String tokenId, int delaySeconds) {
-        new Thread(() -> {
-            try {
-                Thread.sleep(delaySeconds * 1000L);
-                tokenStore.remove(tokenId);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }).start();
+    // Generate token for SHARED USER (NEW)
+    public QrTokenInfo generateSharedToken(Long vehicleId, Long sharedWithUserId, Long ownerId) throws Exception {
+        // Check if vehicle is shared with this user and has refuel permission
+        SharedVehicle shared = sharedVehicleRepository
+                .findByVehicleIdAndSharedWithUserId(vehicleId, sharedWithUserId)
+                .orElseThrow(() -> new RuntimeException("Vehicle not shared with this user"));
+
+        Map<String, Boolean> permissions = parseJsonToMap(shared.getPermissions());
+        if (!permissions.getOrDefault("can_refuel", false)) {
+            throw new RuntimeException("You don't have permission to refuel this vehicle");
+        }
+
+        String tokenId = UUID.randomUUID().toString();
+        String nonce = UUID.randomUUID().toString();
+
+        Instant now = Instant.now();
+        Instant expiresAt = now.plusSeconds(tokenExpirySeconds);
+
+        QrTokenInfo token = new QrTokenInfo();
+        token.setTokenId(tokenId);
+        token.setNonce(nonce);
+        token.setVehicleId(vehicleId);
+        token.setUserId(sharedWithUserId);
+        token.setOwnerId(ownerId);
+        token.setCreatedAt(now);
+        token.setExpiresAt(expiresAt);
+        token.setUsed(false);
+        token.setTokenType("SHARED");
+
+        tokenStore.put(tokenId, token);
+        scheduleCleanup(tokenId, tokenExpirySeconds);
+
+        return token;
     }
 
     // Generate QR payload with signature
@@ -85,11 +110,13 @@ public class QrTokenService {
         payload.setTokenId(token.getTokenId());
         payload.setNonce(token.getNonce());
         payload.setTimestamp(System.currentTimeMillis());
+        payload.setTokenType(token.getTokenType());
 
         String signatureData = payload.getPasscode() + "|" +
                 payload.getTokenId() + "|" +
                 payload.getNonce() + "|" +
-                payload.getTimestamp();
+                payload.getTimestamp() + "|" +
+                payload.getTokenType();
         String signature = generateHmacSignature(signatureData);
         payload.setSignature(signature);
 
@@ -116,7 +143,8 @@ public class QrTokenService {
             String signatureData = payload.getPasscode() + "|" +
                     payload.getTokenId() + "|" +
                     payload.getNonce() + "|" +
-                    payload.getTimestamp();
+                    payload.getTimestamp() + "|" +
+                    payload.getTokenType();
             String expectedSignature = generateHmacSignature(signatureData);
 
             if (!expectedSignature.equals(receivedSignature)) {
@@ -128,7 +156,6 @@ public class QrTokenService {
                 return QrVerificationResult.invalid("QR code expired (timestamp)");
             }
 
-            // Check in-memory token
             QrTokenInfo token = tokenStore.get(payload.getTokenId());
             if (token == null) {
                 return QrVerificationResult.invalid("Token not found or expired");
@@ -143,21 +170,17 @@ public class QrTokenService {
                 return QrVerificationResult.invalid("Token expired");
             }
 
-            // Check nonce
             if (nonceStore.containsKey(payload.getNonce())) {
                 return QrVerificationResult.invalid("QR code already processed");
             }
 
-            // Get vehicle - FIXED: Use Long.valueOf() to handle both Integer and Long
-            Long vehicleId = convertToLong(token.getVehicleId());
-            Vehicle vehicle = vehicleRepository.findById(vehicleId)
+            Vehicle vehicle = vehicleRepository.findById(token.getVehicleId())
                     .orElseThrow(() -> new RuntimeException("Vehicle not found"));
 
             if (!vehicle.getFuelPassCode().equals(payload.getPasscode())) {
                 return QrVerificationResult.invalid("Passcode mismatch");
             }
 
-            // Mark nonce as used
             nonceStore.put(payload.getNonce(), "1");
             scheduleNonceCleanup(payload.getNonce(), tokenExpirySeconds);
 
@@ -169,38 +192,35 @@ public class QrTokenService {
         }
     }
 
-    // Helper method to safely convert Object to Long
-    private Long convertToLong(Object value) {
-        if (value == null) {
-            return null;
+    // Mark token as used
+    public void markTokenAsUsed(String tokenId, Long staffId) {
+        QrTokenInfo token = tokenStore.get(tokenId);
+        if (token != null) {
+            token.setUsed(true);
+            token.setUsedBy(String.valueOf(staffId));
+            token.setUsedAt(Instant.now());
         }
-        if (value instanceof Long) {
-            return (Long) value;
-        }
-        if (value instanceof Integer) {
-            return ((Integer) value).longValue();
-        }
-        if (value instanceof String) {
-            return Long.parseLong((String) value);
-        }
-        if (value instanceof Number) {
-            return ((Number) value).longValue();
-        }
-        throw new IllegalArgumentException("Cannot convert " + value.getClass() + " to Long");
     }
 
-    // Helper method to safely convert Object to Boolean
-    private Boolean convertToBoolean(Object value) {
-        if (value == null) {
-            return false;
-        }
-        if (value instanceof Boolean) {
-            return (Boolean) value;
-        }
-        if (value instanceof String) {
-            return Boolean.parseBoolean((String) value);
-        }
-        return false;
+    // Get token info
+    public QrTokenInfo getToken(String tokenId) {
+        return tokenStore.get(tokenId);
+    }
+
+    // Invalidate token
+    public void invalidateToken(String tokenId) {
+        tokenStore.remove(tokenId);
+    }
+
+    private void scheduleCleanup(String tokenId, int delaySeconds) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(delaySeconds * 1000L);
+                tokenStore.remove(tokenId);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
     }
 
     private void scheduleNonceCleanup(String nonce, int delaySeconds) {
@@ -214,25 +234,26 @@ public class QrTokenService {
         }).start();
     }
 
-    // Mark token as used
-    public void markTokenAsUsed(String tokenId, Long staffId) {
-        QrTokenInfo token = tokenStore.get(tokenId);
-        if (token != null) {
-            token.setUsed(true);
-            token.setUsedBy(String.valueOf(staffId));
-            token.setUsedAt(Instant.now());
+    private Map<String, Boolean> parseJsonToMap(String json) {
+        Map<String, Boolean> map = new HashMap<>();
+        if (json == null || json.isEmpty()) return map;
+
+        try {
+            String clean = json.replace("{", "").replace("}", "");
+            if (clean.isEmpty()) return map;
+
+            for (String pair : clean.split(",")) {
+                String[] parts = pair.split(":");
+                if (parts.length == 2) {
+                    String key = parts[0].replace("\"", "").trim();
+                    Boolean value = Boolean.parseBoolean(parts[1].trim());
+                    map.put(key, value);
+                }
+            }
+        } catch (Exception e) {
+            // Use default
         }
-    }
-
-    // Mark nonce as used
-    public void markNonceAsUsed(String nonce) {
-        nonceStore.put(nonce, "1");
-        scheduleNonceCleanup(nonce, tokenExpirySeconds);
-    }
-
-    // Invalidate token
-    public void invalidateToken(String tokenId) {
-        tokenStore.remove(tokenId);
+        return map;
     }
 
     private String generateHmacSignature(String data) throws Exception {

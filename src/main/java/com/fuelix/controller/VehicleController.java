@@ -5,7 +5,9 @@ import com.fuelix.dto.QrGenerationResponse;
 import com.fuelix.model.QrTokenInfo;
 import com.fuelix.model.QrVerificationResult;
 import com.fuelix.model.Quota;
+import com.fuelix.model.SharedVehicle;
 import com.fuelix.model.Vehicle;
+import com.fuelix.repository.SharedVehicleRepository;
 import com.fuelix.service.FuelLogService;
 import com.fuelix.service.FuelPriceService;
 import com.fuelix.service.NotificationService;
@@ -50,6 +52,9 @@ public class VehicleController {
 
     @Autowired
     private JwtService jwtService;
+
+    @Autowired
+    private SharedVehicleRepository sharedVehicleRepository;
 
     private Long getUserIdFromToken(String authHeader) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
@@ -419,8 +424,9 @@ public class VehicleController {
         }
     }
 
-    // ==================== DYNAMIC QR TOKEN APIs (V2) ====================
+    // ==================== DYNAMIC QR TOKEN APIs ====================
 
+    // Generate dynamic QR token for OWNER
     @PostMapping("/{vehicleId}/dynamic-qr")
     public ResponseEntity<?> generateDynamicQr(
             @PathVariable Long vehicleId,
@@ -447,6 +453,63 @@ public class VehicleController {
             }
 
             QrTokenInfo token = qrTokenService.generateToken(vehicleId, userId);
+            String qrData = qrTokenService.generateQrPayload(token, vehicle);
+
+            QrGenerationResponse response = QrGenerationResponse.builder()
+                    .qrData(qrData)
+                    .tokenId(token.getTokenId())
+                    .expiresIn(300)
+                    .generatedAt(System.currentTimeMillis())
+                    .message("QR generated successfully")
+                    .build();
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.badRequest().body(error);
+        }
+    }
+
+    // Generate dynamic QR token for SHARED USER
+    @PostMapping("/{vehicleId}/shared-qr")
+    public ResponseEntity<?> generateSharedQr(
+            @PathVariable Long vehicleId,
+            @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Not authenticated");
+                return ResponseEntity.status(401).body(error);
+            }
+
+            Vehicle vehicle = vehicleService.getVehicleById(vehicleId);
+
+            // Check if vehicle is shared with this user
+            SharedVehicle shared = sharedVehicleRepository
+                    .findByVehicleIdAndSharedWithUserId(vehicleId, userId)
+                    .orElse(null);
+
+            if (shared == null) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "Vehicle not shared with you");
+                return ResponseEntity.status(403).body(error);
+            }
+
+            // Check refuel permission
+            Map<String, Boolean> permissions = parseJsonToMap(shared.getPermissions());
+            if (!permissions.getOrDefault("can_refuel", false)) {
+                Map<String, String> error = new HashMap<>();
+                error.put("error", "You don't have permission to refuel this vehicle");
+                return ResponseEntity.status(403).body(error);
+            }
+
+            // Generate token for shared user
+            QrTokenInfo token = qrTokenService.generateSharedToken(vehicleId, userId, vehicle.getUserId());
+
+            // Generate QR payload
             String qrData = qrTokenService.generateQrPayload(token, vehicle);
 
             QrGenerationResponse response = QrGenerationResponse.builder()
@@ -611,5 +674,28 @@ public class VehicleController {
         } catch (Exception e) {
             return ResponseEntity.ok(Map.of("hasVehicleWithFuelPass", false));
         }
+    }
+
+    // Helper method to parse JSON permissions
+    private Map<String, Boolean> parseJsonToMap(String json) {
+        Map<String, Boolean> map = new HashMap<>();
+        if (json == null || json.isEmpty()) return map;
+
+        try {
+            String clean = json.replace("{", "").replace("}", "");
+            if (clean.isEmpty()) return map;
+
+            for (String pair : clean.split(",")) {
+                String[] parts = pair.split(":");
+                if (parts.length == 2) {
+                    String key = parts[0].replace("\"", "").trim();
+                    Boolean value = Boolean.parseBoolean(parts[1].trim());
+                    map.put(key, value);
+                }
+            }
+        } catch (Exception e) {
+            // Use default
+        }
+        return map;
     }
 }
