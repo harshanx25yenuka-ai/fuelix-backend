@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/family")
@@ -44,6 +46,9 @@ public class FamilyController {
 
     @Autowired
     private JwtService jwtService;
+
+    @Autowired
+    private InviteTokenRepository inviteTokenRepository;
 
     private static final int MAX_MEMBERS = 4;
 
@@ -426,8 +431,6 @@ public class FamilyController {
         }
     }
 
-    // ==================== UPDATE MEMBER PERMISSIONS (UPDATED) ====================
-
     @PutMapping("/members/{memberId}/permissions")
     public ResponseEntity<?> updateMemberPermissions(@PathVariable Long memberId,
                                                      @RequestBody Map<String, Object> request,
@@ -452,16 +455,13 @@ public class FamilyController {
             FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, memberId)
                     .orElseThrow(() -> new RuntimeException("Member not found"));
 
-            // Update permissions in family_members table
             String permissionsJson = convertMapToJson(permissions);
             member.setPermissions(permissionsJson);
             familyMemberRepository.save(member);
 
-            // IMPORTANT: Update can_refuel permission in shared_vehicles table
             if (permissions.containsKey("can_refuel")) {
                 boolean canRefuel = permissions.get("can_refuel");
 
-                // Get all vehicles shared WITH this member
                 List<SharedVehicle> sharedVehicles = sharedVehicleRepository.findBySharedWithUserIdAndIsActiveTrue(memberId);
 
                 for (SharedVehicle sv : sharedVehicles) {
@@ -521,7 +521,6 @@ public class FamilyController {
                 throw new RuntimeException("Vehicle already shared with this user");
             }
 
-            // Get member's refuel permission from family_members table
             Map<String, Boolean> memberPermissions = parseJsonToMap(sharedMember.getPermissions());
             boolean canRefuel = memberPermissions.getOrDefault("can_refuel", false);
 
@@ -825,6 +824,267 @@ public class FamilyController {
             return ResponseEntity.ok(Map.of("canShareVehicle", canShareVehicle));
         } catch (Exception e) {
             return ResponseEntity.ok(Map.of("canShareVehicle", false));
+        }
+    }
+
+    // ==================== QR INVITE MANAGEMENT ====================
+
+    @PostMapping("/generate-invite-qr")
+    public ResponseEntity<?> generateInviteQr(@RequestBody Map<String, Object> request,
+                                              @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            Long familyId = Long.parseLong(request.get("familyId").toString());
+            int maxUses = request.containsKey("maxUses") ? (int) request.get("maxUses") : 1;
+            int expiryHours = request.containsKey("expiryHours") ? (int) request.get("expiryHours") : 24;
+
+            FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, userId)
+                    .orElseThrow(() -> new RuntimeException("Not a family member"));
+
+            if (!"OWNER".equals(member.getRole())) {
+                throw new RuntimeException("Only family owner can generate invite QR");
+            }
+
+            String token = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            LocalDateTime expiresAt = LocalDateTime.now().plusHours(expiryHours);
+
+            InviteToken inviteToken = new InviteToken(token, familyId, userId, expiresAt);
+            inviteToken.setMaxUses(maxUses);
+            inviteToken.setUseCount(0);
+            inviteToken.setUsed(false);
+            inviteTokenRepository.save(inviteToken);
+
+            String qrData = String.format("FUELIX_INVITE|%s|%s|%d",
+                    token,
+                    familyId,
+                    expiresAt.toEpochSecond(java.time.ZoneOffset.UTC)
+            );
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("qrData", qrData);
+            response.put("token", token);
+            response.put("expiresAt", expiresAt);
+            response.put("expiryHours", expiryHours);
+            response.put("maxUses", maxUses);
+            response.put("message", "QR invite generated successfully");
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/join-by-qr")
+    public ResponseEntity<?> joinFamilyByQr(@RequestBody Map<String, String> request,
+                                            @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            String qrData = request.get("qrData");
+
+            String[] parts = qrData.split("\\|");
+            if (parts.length < 4 || !"FUELIX_INVITE".equals(parts[0])) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Invalid QR code format"));
+            }
+
+            String token = parts[1];
+            Long familyId = Long.parseLong(parts[2]);
+            long expiresAtEpoch = Long.parseLong(parts[3]);
+            LocalDateTime expiresAt = LocalDateTime.ofEpochSecond(expiresAtEpoch, 0, java.time.ZoneOffset.UTC);
+
+            if (LocalDateTime.now().isAfter(expiresAt)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Invitation QR code has expired"));
+            }
+
+            InviteToken inviteToken = inviteTokenRepository.findByToken(token)
+                    .orElseThrow(() -> new RuntimeException("Invalid invitation token"));
+
+            if (!inviteToken.isValid()) {
+                if (inviteToken.isUsed()) {
+                    return ResponseEntity.badRequest().body(Map.of("error", "This invitation has already been used"));
+                }
+                if (inviteToken.getUseCount() >= inviteToken.getMaxUses()) {
+                    return ResponseEntity.badRequest().body(Map.of("error", "This invitation has reached maximum uses"));
+                }
+                if (LocalDateTime.now().isAfter(inviteToken.getExpiresAt())) {
+                    return ResponseEntity.badRequest().body(Map.of("error", "Invitation has expired"));
+                }
+                return ResponseEntity.badRequest().body(Map.of("error", "Invalid invitation"));
+            }
+
+            if (familyMemberRepository.existsByFamilyIdAndUserId(familyId, userId)) {
+                return ResponseEntity.badRequest().body(Map.of("error", "You are already a member of this family"));
+            }
+
+            long activeMemberCount = familyMemberRepository.countByFamilyIdAndIsActiveTrue(familyId);
+            if (activeMemberCount >= MAX_MEMBERS) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Family member limit reached (Max " + MAX_MEMBERS + " members)"));
+            }
+
+            FamilyMember member = new FamilyMember(familyId, userId, "MEMBER", inviteToken.getInvitedBy());
+
+            Map<String, Boolean> defaultPermissions = new HashMap<>();
+            defaultPermissions.put("can_refuel", false);
+            defaultPermissions.put("can_topup", false);
+            defaultPermissions.put("can_view_wallet", true);
+            defaultPermissions.put("can_share_vehicle", false);
+            member.setPermissions(convertMapToJson(defaultPermissions));
+            member.setIsActive(true);
+            member.setJoinedAt(LocalDateTime.now());
+            familyMemberRepository.save(member);
+
+            inviteToken.setUseCount(inviteToken.getUseCount() + 1);
+            if (inviteToken.getUseCount() >= inviteToken.getMaxUses()) {
+                inviteToken.setUsed(true);
+            }
+            inviteToken.setUsedBy(userId);
+            inviteToken.setUsedAt(LocalDateTime.now());
+            inviteTokenRepository.save(inviteToken);
+
+            Family family = familyRepository.findById(familyId).get();
+            notificationService.createPrivateNotification(
+                    inviteToken.getInvitedBy(),
+                    "New Member Joined via QR",
+                    "A new member has joined your family using QR code",
+                    Map.of("type", "MEMBER_JOINED", "userId", userId, "familyId", familyId)
+            );
+
+            notificationService.createPrivateNotification(
+                    userId,
+                    "Welcome to Family",
+                    "You have joined '" + family.getFamilyName() + "' family",
+                    Map.of("type", "FAMILY_JOINED", "familyId", familyId, "familyName", family.getFamilyName())
+            );
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Successfully joined the family");
+            response.put("familyId", familyId);
+            response.put("familyName", family.getFamilyName());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/invite-qr-status/{token}")
+    public ResponseEntity<?> getInviteQrStatus(@PathVariable String token) {
+        try {
+            InviteToken inviteToken = inviteTokenRepository.findByToken(token)
+                    .orElse(null);
+
+            if (inviteToken == null) {
+                return ResponseEntity.ok(Map.of(
+                        "valid", false,
+                        "message", "Invalid invitation token"
+                ));
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("valid", inviteToken.isValid());
+            response.put("expiresAt", inviteToken.getExpiresAt());
+            response.put("maxUses", inviteToken.getMaxUses());
+            response.put("useCount", inviteToken.getUseCount());
+            response.put("remainingUses", inviteToken.getMaxUses() - inviteToken.getUseCount());
+
+            if (!inviteToken.isValid()) {
+                if (inviteToken.isUsed()) {
+                    response.put("message", "This invitation has been used");
+                } else if (inviteToken.getUseCount() >= inviteToken.getMaxUses()) {
+                    response.put("message", "This invitation has reached maximum uses");
+                } else if (LocalDateTime.now().isAfter(inviteToken.getExpiresAt())) {
+                    response.put("message", "This invitation has expired");
+                }
+            } else {
+                response.put("message", "Invitation is valid");
+            }
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("valid", false, "message", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/revoke-invite-qr/{token}")
+    public ResponseEntity<?> revokeInviteQr(@PathVariable String token,
+                                            @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            InviteToken inviteToken = inviteTokenRepository.findByToken(token)
+                    .orElseThrow(() -> new RuntimeException("Invitation not found"));
+
+            FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(inviteToken.getFamilyId(), userId)
+                    .orElseThrow(() -> new RuntimeException("Not a family member"));
+
+            if (!"OWNER".equals(member.getRole())) {
+                throw new RuntimeException("Only family owner can revoke invitations");
+            }
+
+            inviteToken.setUsed(true);
+            inviteTokenRepository.save(inviteToken);
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Invitation revoked successfully"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/active-invites/{familyId}")
+    public ResponseEntity<?> getActiveInvites(@PathVariable Long familyId,
+                                              @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, userId)
+                    .orElseThrow(() -> new RuntimeException("Not a family member"));
+
+            if (!"OWNER".equals(member.getRole())) {
+                throw new RuntimeException("Only family owner can view invites");
+            }
+
+            List<InviteToken> tokens = inviteTokenRepository.findAll().stream()
+                    .filter(t -> t.getFamilyId().equals(familyId) && !t.isUsed() && t.isValid())
+                    .collect(Collectors.toList());
+
+            List<Map<String, Object>> result = new ArrayList<>();
+            for (InviteToken token : tokens) {
+                Map<String, Object> invite = new HashMap<>();
+                invite.put("token", token.getToken());
+                invite.put("expiresAt", token.getExpiresAt());
+                invite.put("maxUses", token.getMaxUses());
+                invite.put("useCount", token.getUseCount());
+                invite.put("remainingUses", token.getMaxUses() - token.getUseCount());
+                result.add(invite);
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "data", result
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 }
