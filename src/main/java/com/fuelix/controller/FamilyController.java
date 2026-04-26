@@ -426,6 +426,8 @@ public class FamilyController {
         }
     }
 
+    // ==================== UPDATE MEMBER PERMISSIONS (UPDATED) ====================
+
     @PutMapping("/members/{memberId}/permissions")
     public ResponseEntity<?> updateMemberPermissions(@PathVariable Long memberId,
                                                      @RequestBody Map<String, Object> request,
@@ -450,12 +452,36 @@ public class FamilyController {
             FamilyMember member = familyMemberRepository.findByFamilyIdAndUserId(familyId, memberId)
                     .orElseThrow(() -> new RuntimeException("Member not found"));
 
+            // Update permissions in family_members table
             String permissionsJson = convertMapToJson(permissions);
             member.setPermissions(permissionsJson);
             familyMemberRepository.save(member);
 
-            return ResponseEntity.ok(Map.of("success", true, "message", "Permissions updated"));
+            // IMPORTANT: Update can_refuel permission in shared_vehicles table
+            if (permissions.containsKey("can_refuel")) {
+                boolean canRefuel = permissions.get("can_refuel");
+
+                // Get all vehicles shared WITH this member
+                List<SharedVehicle> sharedVehicles = sharedVehicleRepository.findBySharedWithUserIdAndIsActiveTrue(memberId);
+
+                for (SharedVehicle sv : sharedVehicles) {
+                    Map<String, Boolean> vehiclePermissions = parseJsonToMap(sv.getPermissions());
+                    vehiclePermissions.put("can_refuel", canRefuel);
+                    sv.setPermissions(convertMapToJson(vehiclePermissions));
+                    sharedVehicleRepository.save(sv);
+
+                    System.out.println("Updated shared_vehicle ID: " + sv.getId() +
+                            " for user ID: " + memberId +
+                            " can_refuel = " + canRefuel);
+                }
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Permissions updated successfully"
+            ));
         } catch (Exception e) {
+            e.printStackTrace();
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
@@ -495,8 +521,12 @@ public class FamilyController {
                 throw new RuntimeException("Vehicle already shared with this user");
             }
 
+            // Get member's refuel permission from family_members table
+            Map<String, Boolean> memberPermissions = parseJsonToMap(sharedMember.getPermissions());
+            boolean canRefuel = memberPermissions.getOrDefault("can_refuel", false);
+
             Map<String, Boolean> defaultPermissions = new HashMap<>();
-            defaultPermissions.put("can_refuel", true);
+            defaultPermissions.put("can_refuel", canRefuel);
             defaultPermissions.put("can_view_quota", true);
             String permissionsJson = convertMapToJson(defaultPermissions);
 
@@ -577,6 +607,7 @@ public class FamilyController {
                 vehicleMap.put("ownerName", owner != null ? owner.getFirstName() + " " + owner.getLastName() : "Unknown");
                 vehicleMap.put("permissions", parseJsonToMap(shared.getPermissions()));
                 vehicleMap.put("sharedAt", shared.getSharedAt());
+                vehicleMap.put("canRefuel", parseJsonToMap(shared.getPermissions()).getOrDefault("can_refuel", false));
 
                 result.add(vehicleMap);
             }
@@ -621,6 +652,7 @@ public class FamilyController {
                 permissions.put("can_refuel", true);
                 permissions.put("can_view_quota", true);
                 vehicleMap.put("permissions", permissions);
+                vehicleMap.put("canRefuel", true);
 
                 result.add(vehicleMap);
             }

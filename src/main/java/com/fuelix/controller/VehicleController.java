@@ -498,11 +498,11 @@ public class VehicleController {
                 return ResponseEntity.status(403).body(error);
             }
 
-            // Check refuel permission
+            // Check refuel permission (SECURITY CHECK - BACKEND)
             Map<String, Boolean> permissions = parseJsonToMap(shared.getPermissions());
             if (!permissions.getOrDefault("can_refuel", false)) {
                 Map<String, String> error = new HashMap<>();
-                error.put("error", "You don't have permission to refuel this vehicle");
+                error.put("error", "PERMISSION_DENIED: You don't have permission to refuel this vehicle");
                 return ResponseEntity.status(403).body(error);
             }
 
@@ -526,6 +526,50 @@ public class VehicleController {
             Map<String, String> error = new HashMap<>();
             error.put("error", e.getMessage());
             return ResponseEntity.badRequest().body(error);
+        }
+    }
+
+    // Check if shared user has refuel permission for a vehicle
+    @GetMapping("/shared-vehicle-permission/{vehicleId}")
+    public ResponseEntity<?> checkSharedVehiclePermission(
+            @PathVariable Long vehicleId,
+            @RequestHeader("Authorization") String authHeader) {
+        try {
+            Long userId = getUserIdFromToken(authHeader);
+            if (userId == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+
+            // Check if vehicle is shared with this user
+            SharedVehicle shared = sharedVehicleRepository
+                    .findByVehicleIdAndSharedWithUserId(vehicleId, userId)
+                    .orElse(null);
+
+            if (shared == null) {
+                return ResponseEntity.ok(Map.of(
+                        "hasPermission", false,
+                        "isShared", false,
+                        "message", "Vehicle not shared with you"
+                ));
+            }
+
+            // Check refuel permission
+            Map<String, Boolean> permissions = parseJsonToMap(shared.getPermissions());
+            boolean canRefuel = permissions.getOrDefault("can_refuel", false);
+
+            return ResponseEntity.ok(Map.of(
+                    "hasPermission", canRefuel,
+                    "isShared", true,
+                    "ownerId", shared.getOwnerUserId(),
+                    "message", canRefuel ? "You have refuel permission" : "You don't have refuel permission"
+            ));
+
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of(
+                    "hasPermission", false,
+                    "isShared", false,
+                    "error", e.getMessage()
+            ));
         }
     }
 

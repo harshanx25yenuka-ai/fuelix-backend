@@ -52,15 +52,16 @@ public class QrTokenService {
         Instant now = Instant.now();
         Instant expiresAt = now.plusSeconds(tokenExpirySeconds);
 
-        QrTokenInfo token = new QrTokenInfo();
-        token.setTokenId(tokenId);
-        token.setNonce(nonce);
-        token.setVehicleId(vehicleId);
-        token.setUserId(userId);
-        token.setCreatedAt(now);
-        token.setExpiresAt(expiresAt);
-        token.setUsed(false);
-        token.setTokenType("OWNER");
+        QrTokenInfo token = QrTokenInfo.builder()
+                .tokenId(tokenId)
+                .nonce(nonce)
+                .vehicleId(vehicleId)
+                .userId(userId)
+                .createdAt(now)
+                .expiresAt(expiresAt)
+                .used(false)
+                .tokenType("OWNER")
+                .build();
 
         tokenStore.put(tokenId, token);
         scheduleCleanup(tokenId, tokenExpirySeconds);
@@ -68,16 +69,17 @@ public class QrTokenService {
         return token;
     }
 
-    // Generate token for SHARED USER (NEW)
+    // Generate token for SHARED USER (with permission check)
     public QrTokenInfo generateSharedToken(Long vehicleId, Long sharedWithUserId, Long ownerId) throws Exception {
-        // Check if vehicle is shared with this user and has refuel permission
+        // Check if vehicle is shared with this user
         SharedVehicle shared = sharedVehicleRepository
                 .findByVehicleIdAndSharedWithUserId(vehicleId, sharedWithUserId)
                 .orElseThrow(() -> new RuntimeException("Vehicle not shared with this user"));
 
+        // Check refuel permission from database (SECURITY CHECK)
         Map<String, Boolean> permissions = parseJsonToMap(shared.getPermissions());
         if (!permissions.getOrDefault("can_refuel", false)) {
-            throw new RuntimeException("You don't have permission to refuel this vehicle");
+            throw new RuntimeException("PERMISSION_DENIED: You don't have permission to refuel this vehicle");
         }
 
         String tokenId = UUID.randomUUID().toString();
@@ -86,16 +88,17 @@ public class QrTokenService {
         Instant now = Instant.now();
         Instant expiresAt = now.plusSeconds(tokenExpirySeconds);
 
-        QrTokenInfo token = new QrTokenInfo();
-        token.setTokenId(tokenId);
-        token.setNonce(nonce);
-        token.setVehicleId(vehicleId);
-        token.setUserId(sharedWithUserId);
-        token.setOwnerId(ownerId);
-        token.setCreatedAt(now);
-        token.setExpiresAt(expiresAt);
-        token.setUsed(false);
-        token.setTokenType("SHARED");
+        QrTokenInfo token = QrTokenInfo.builder()
+                .tokenId(tokenId)
+                .nonce(nonce)
+                .vehicleId(vehicleId)
+                .userId(sharedWithUserId)
+                .ownerId(ownerId)
+                .createdAt(now)
+                .expiresAt(expiresAt)
+                .used(false)
+                .tokenType("SHARED")
+                .build();
 
         tokenStore.put(tokenId, token);
         scheduleCleanup(tokenId, tokenExpirySeconds);
@@ -105,12 +108,13 @@ public class QrTokenService {
 
     // Generate QR payload with signature
     public String generateQrPayload(QrTokenInfo token, Vehicle vehicle) throws Exception {
-        QrPayload payload = new QrPayload();
-        payload.setPasscode(vehicle.getFuelPassCode());
-        payload.setTokenId(token.getTokenId());
-        payload.setNonce(token.getNonce());
-        payload.setTimestamp(System.currentTimeMillis());
-        payload.setTokenType(token.getTokenType());
+        QrPayload payload = QrPayload.builder()
+                .passcode(vehicle.getFuelPassCode())
+                .tokenId(token.getTokenId())
+                .nonce(token.getNonce())
+                .timestamp(System.currentTimeMillis())
+                .tokenType(token.getTokenType())
+                .build();
 
         String signatureData = payload.getPasscode() + "|" +
                 payload.getTokenId() + "|" +
